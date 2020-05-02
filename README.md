@@ -1,3 +1,7 @@
+# NOTICE
+
+This is forked from [nf-core/chipseq](https://github.com/nf-core/chipseq) and configed for running on SJ HPC.
+
 # ![nf-core/chipseq](docs/images/nf-core-chipseq_logo.png)
 
 [![Build Status](https://travis-ci.com/nf-core/chipseq.svg?branch=master)](https://travis-ci.com/nf-core/chipseq)
