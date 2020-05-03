@@ -923,7 +923,7 @@ process BigWig {
     """
     SCALE_FACTOR=\$(grep 'mapped (' $flagstat | awk '{print 1000000/\$1}')
     echo \$SCALE_FACTOR > ${prefix}.scale_factor.txt
-    genomeCoverageBed -ibam ${bam[0]} -bg -scale \$SCALE_FACTOR $pe_fragment $extend | sort -k1,1 -k2,2n >  ${prefix}.bedGraph
+    genomeCoverageBed -ibam ${bam[0]} -bg -scale \$SCALE_FACTOR $pe_fragment $extend | LC_ALL=C sort -k1,1 -k2,2n >  ${prefix}.bedGraph
 
     bedGraphToBigWig ${prefix}.bedGraph $sizes ${prefix}.bigWig
 
@@ -1227,7 +1227,7 @@ process ConsensusPeakSet {
     collapsecols = params.narrow_peak ? (["collapse"]*9).join(',') : (["collapse"]*8).join(',')
     expandparam = params.narrow_peak ? "--is_narrow_peak" : ""
     """
-    sort -k1,1 -k2,2n ${peaks.collect{it.toString()}.sort().join(' ')} \\
+    LC_ALL=C  sort -k1,1 -k2,2n ${peaks.collect{it.toString()}.sort().join(' ')} \\
         | mergeBed -c $mergecols -o $collapsecols > ${prefix}.txt
 
     macs2_merged_expand.py ${prefix}.txt \\
@@ -1278,7 +1278,7 @@ process ConsensusPeakSetAnnotate {
         -cpu $task.cpus \\
         > ${prefix}.annotatePeaks.txt
 
-    cut -f2- ${prefix}.annotatePeaks.txt | awk 'NR==1; NR > 1 {print \$0 | "sort -k1,1 -k2,2n"}' | cut -f6- > tmp.txt
+    cut -f2- ${prefix}.annotatePeaks.txt | awk 'NR==1; NR > 1 {print \$0 | "LC_ALL=C sort -k1,1 -k2,2n"}' | cut -f6- > tmp.txt
     paste $bool tmp.txt > ${prefix}.boolean.annotatePeaks.txt
     """
 }
