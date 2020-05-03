@@ -1,6 +1,6 @@
 # NOTICE
 
-This is forked from [nf-core/chipseq](https://github.com/nf-core/chipseq) and configed for running on SJ HPC.
+This is forked from [markgene/chipseq](https://github.com/markgene/chipseq), which itself is forked from[nf-core/chipseq](https://github.com/nf-core/chipseq) configed for running on SJ HPC. This repo focuses on CUT&RUN instead of regular ChIP-seq.
 
 # ![nf-core/chipseq](docs/images/nf-core-chipseq_logo.png)
 
