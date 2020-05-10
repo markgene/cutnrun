@@ -900,6 +900,42 @@ process CollectMultipleMetrics {
     """
 }
 
+/*
+ * STEP 5.3 Read depth normalised bigWig
+ */
+process BigWig {
+    tag "$name"
+    label 'process_medium'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/bigwig", mode: 'copy',
+        saveAs: { filename ->
+                      if (filename.endsWith("scale_factor.txt")) "scale/$filename"
+                      else if (filename.endsWith(".bigWig")) "$filename"
+                      else null
+                }
+
+    input:
+    set val(name), file(bam), file(flagstat) from ch_rm_orphan_bam_bigwig.join(ch_rm_orphan_flagstat_bigwig, by: [0])
+    file sizes from ch_genome_sizes_bigwig.collect()
+
+    output:
+    set val(name), file("*.bigWig") into ch_bigwig_plotprofile
+    file "*scale_factor.txt" into ch_bigwig_scale
+    file "*igv.txt" into ch_bigwig_igv
+
+    script:
+    prefix = "${name}.mLb.clN"
+    pe_fragment = params.single_end ? "" : "-pc"
+    extend = (params.single_end && params.fragment_size > 0) ? "-fs ${params.fragment_size}" : ''
+    """
+    SCALE_FACTOR=\$(grep 'mapped (' $flagstat | awk '{print 1000000/\$1}')
+    echo \$SCALE_FACTOR > ${prefix}.scale_factor.txt
+    genomeCoverageBed -ibam ${bam[0]} -bg -scale \$SCALE_FACTOR $pe_fragment $extend | LC_ALL=C sort -k1,1 -k2,2n >  ${prefix}.bedGraph
+
+    bedGraphToBigWig ${prefix}.bedGraph $sizes ${prefix}.bigWig
+
+    find * -type f -name "*.bigWig" -exec echo -e "bowtie2/mergedLibrary/bigwig/"{}"\\t0,0,178" \\; > ${prefix}.bigWig.igv.txt
+    """
+}
 
 
 
