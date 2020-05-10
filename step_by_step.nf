@@ -858,6 +858,50 @@ process Preseq {
     """
 }
 
+/*
+ * STEP 5.2 Picard CollectMultipleMetrics after merging libraries and filtering
+ */
+process CollectMultipleMetrics {
+    tag "$name"
+    label 'process_medium'
+    publishDir path: "${params.outdir}/bowtie2/mergedLibrary", mode: 'copy',
+        saveAs: { filename ->
+                      if (filename.endsWith("_metrics")) "picard_metrics/$filename"
+                      else if (filename.endsWith(".pdf")) "picard_metrics/pdf/$filename"
+                      else null
+                }
+
+    when:
+    !params.skip_picard_metrics
+
+    input:
+    set val(name), file(bam) from ch_rm_orphan_bam_metrics
+    file fasta from ch_fasta
+
+    output:
+    file "*_metrics" into ch_collectmetrics_mqc
+    file "*.pdf" into ch_collectmetrics_pdf
+
+    script:
+    prefix = "${name}.mLb.clN"
+    def avail_mem = 3
+    if (!task.memory) {
+        log.info "[Picard CollectMultipleMetrics] Available memory not known - defaulting to 3GB. Specify process memory requirements to change this."
+    } else {
+        avail_mem = task.memory.toGiga()
+    }
+    """
+    picard -Xmx${avail_mem}g CollectMultipleMetrics \\
+        INPUT=${bam[0]} \\
+        OUTPUT=${prefix}.CollectMultipleMetrics \\
+        REFERENCE_SEQUENCE=$fasta \\
+        VALIDATION_STRINGENCY=LENIENT \\
+        TMP_DIR=tmp
+    """
+}
+
+
+
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
