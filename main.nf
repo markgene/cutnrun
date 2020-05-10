@@ -577,6 +577,7 @@ process Bowtie2 {
     """
     bowtie2 --local -q \\
     -p $task.cpus \\
+    --very-sensitive-local --no-unal --no-mixed --no-discordant --phred33 -I 10 -X 700 \\
     --rg-id $name \\
     --rg $sm --rg $pl --rg $lb --rg PU:1 \\
     -x ${index}/${bowtie2_base} \\
