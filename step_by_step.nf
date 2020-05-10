@@ -829,6 +829,39 @@ if (params.single_end) {
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 /* --                                                                     -- */
+/* --                 MERGE LIBRARY BAM POST-ANALYSIS                     -- */
+/* --                                                                     -- */
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * STEP 5.1 preseq analysis after merging libraries and before filtering
+ */
+process Preseq {
+    tag "$name"
+    label 'process_low'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/preseq", mode: 'copy'
+
+    when:
+    !params.skip_preseq
+
+    input:
+    set val(name), file(bam) from ch_merge_bam_preseq
+
+    output:
+    file "*.ccurve.txt" into ch_preseq_mqc
+
+    script:
+    prefix = "${name}.mLb.clN"
+    """
+    preseq lc_extrap -v -output ${prefix}.ccurve.txt -bam ${bam[0]}
+    """
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/* --                                                                     -- */
 /* --                       NF-CORE HEADER                                -- */
 /* --                                                                     -- */
 ///////////////////////////////////////////////////////////////////////////////
