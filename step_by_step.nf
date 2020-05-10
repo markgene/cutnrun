@@ -709,6 +709,62 @@ process MergeBAM {
     }
 }
 
+/*
+ * STEP 4.2 Filter BAM file at merged library-level
+ */
+process MergeBAMFilter {
+    tag "$name"
+    label 'process_medium'
+    publishDir path: "${params.outdir}/bowtie2/mergedLibrary", mode: 'copy',
+        saveAs: { filename ->
+                      if (params.single_end || params.save_align_intermeds) {
+                          if (filename.endsWith(".flagstat")) "samtools_stats/$filename"
+                          else if (filename.endsWith(".idxstats")) "samtools_stats/$filename"
+                          else if (filename.endsWith(".stats")) "samtools_stats/$filename"
+                          else if (filename.endsWith(".sorted.bam")) filename
+                          else if (filename.endsWith(".sorted.bam.bai")) filename
+                          else null
+                      }
+                }
+
+    input:
+    set val(name), file(bam) from ch_merge_bam_filter
+    file bed from ch_genome_filter_regions.collect()
+    file bamtools_filter_config from ch_bamtools_filter_config
+
+    output:
+    set val(name), file("*.{bam,bam.bai}") into ch_filter_bam
+    set val(name), file("*.flagstat") into ch_filter_bam_flagstat
+    file "*.{idxstats,stats}" into ch_filter_bam_stats_mqc
+
+    script:
+    prefix = params.single_end ? "${name}.mLb.clN" : "${name}.mLb.flT"
+    filter_params = params.single_end ? "-F 0x004" : "-F 0x004 -F 0x0008 -f 0x001"
+    dup_params = params.keep_dups ? "" : "-F 0x0400"
+    multimap_params = params.keep_multi_map ? "" : "-q 1"
+    blacklist_params = params.blacklist ? "-L $bed" : ""
+    name_sort_bam = params.single_end ? "" : "samtools sort -n -@ $task.cpus -o ${prefix}.bam -T $prefix ${prefix}.sorted.bam"
+    """
+    samtools view \\
+        $filter_params \\
+        $dup_params \\
+        $multimap_params \\
+        $blacklist_params \\
+        -b ${bam[0]} \\
+        | bamtools filter \\
+            -out ${prefix}.sorted.bam \\
+            -script $bamtools_filter_config
+
+    samtools index ${prefix}.sorted.bam
+    samtools flagstat ${prefix}.sorted.bam > ${prefix}.sorted.bam.flagstat
+    samtools idxstats ${prefix}.sorted.bam > ${prefix}.sorted.bam.idxstats
+    samtools stats ${prefix}.sorted.bam > ${prefix}.sorted.bam.stats
+
+    $name_sort_bam
+    """
+}
+
+
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 /* --                                                                     -- */
