@@ -501,7 +501,7 @@ if (params.skip_trimming) {
 } else {
     process TrimGalore {
         tag "$name"
-        label 'process_medium'
+        label 'process_long'
         publishDir "${params.outdir}/trim_galore", mode: 'copy',
             saveAs: { filename ->
                           if (filename.endsWith(".html")) "fastqc/$filename"
