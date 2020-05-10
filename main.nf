@@ -571,9 +571,6 @@ process Bowtie2 {
     if (params.seq_center) {
         rg = "\'@RG\\tID:${name}\\tSM:${name.split('_')[0..-2].join('_')}\\tPL:ILLUMINA\\tLB:${name}\\tPU:1\\tCN:${params.seq_center}\'"
     }
-    println name
-    println rg
-    println prefix
     """
     bowtie2 --local -q \\
     -p $task.cpus \\
