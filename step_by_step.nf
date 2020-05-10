@@ -501,7 +501,7 @@ if (params.skip_trimming) {
 } else {
     process TrimGalore {
         tag "$name"
-        label 'process_long'
+        label 'process_medium'
         publishDir "${params.outdir}/trim_galore", mode: 'copy',
             saveAs: { filename ->
                           if (filename.endsWith(".html")) "fastqc/$filename"
@@ -935,6 +935,717 @@ process BigWig {
 
     find * -type f -name "*.bigWig" -exec echo -e "bowtie2/mergedLibrary/bigwig/"{}"\\t0,0,178" \\; > ${prefix}.bigWig.igv.txt
     """
+}
+
+/*
+ * STEP 5.4 generate gene body coverage plot with deepTools
+ */
+process PlotProfile {
+    tag "$name"
+    label 'process_high'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/deepTools/plotProfile", mode: 'copy'
+
+    when:
+    !params.skip_plot_profile
+
+    input:
+    set val(name), file(bigwig) from ch_bigwig_plotprofile
+    file bed from ch_gene_bed
+
+    output:
+    file '*.{gz,pdf}' into ch_plotprofile_results
+    file '*.plotProfile.tab' into ch_plotprofile_mqc
+
+    script:
+    """
+    computeMatrix scale-regions \\
+        --regionsFileName $bed \\
+        --scoreFileName $bigwig \\
+        --outFileName ${name}.computeMatrix.mat.gz \\
+        --outFileNameMatrix ${name}.computeMatrix.vals.mat.gz \\
+        --regionBodyLength 1000 \\
+        --beforeRegionStartLength 3000 \\
+        --afterRegionStartLength 3000 \\
+        --skipZeros \\
+        --smartLabels \\
+        --numberOfProcessors $task.cpus
+
+    plotProfile --matrixFile ${name}.computeMatrix.mat.gz \\
+        --outFileName ${name}.plotProfile.pdf \\
+        --outFileNameData ${name}.plotProfile.tab
+    """
+}
+
+/*
+ * STEP 5.5 Phantompeakqualtools
+ */
+process PhantomPeakQualTools {
+    tag "$name"
+    label 'process_medium'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/phantompeakqualtools", mode: 'copy'
+
+    when:
+    !params.skip_spp
+
+    input:
+    set val(name), file(bam) from ch_rm_orphan_bam_phantompeakqualtools
+    file spp_correlation_header from ch_spp_correlation_header
+    file spp_nsc_header from ch_spp_nsc_header
+    file spp_rsc_header from ch_spp_rsc_header
+
+    output:
+    file '*.pdf' into ch_spp_plot
+    file '*.spp.out' into ch_spp_out,
+                          ch_spp_out_mqc
+    file '*_mqc.tsv' into ch_spp_csv_mqc
+
+    script:
+    """
+    RUN_SPP=`which run_spp.R`
+    Rscript -e "library(caTools); source(\\"\$RUN_SPP\\")" -c="${bam[0]}" -savp="${name}.spp.pdf" -savd="${name}.spp.Rdata" -out="${name}.spp.out" -p=$task.cpus
+    cp $spp_correlation_header ${name}_spp_correlation_mqc.tsv
+    Rscript -e "load('${name}.spp.Rdata'); write.table(crosscorr\\\$cross.correlation, file=\\"${name}_spp_correlation_mqc.tsv\\", sep=",", quote=FALSE, row.names=FALSE, col.names=FALSE,append=TRUE)"
+
+    awk -v OFS='\t' '{print "${name}", \$9}' ${name}.spp.out | cat $spp_nsc_header - > ${name}_spp_nsc_mqc.tsv
+    awk -v OFS='\t' '{print "${name}", \$10}' ${name}.spp.out | cat $spp_rsc_header - > ${name}_spp_rsc_mqc.tsv
+    """
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/* --                                                                     -- */
+/* --                 MERGE LIBRARY PEAK ANALYSIS                         -- */
+/* --                                                                     -- */
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+// Create channel linking IP bams with control bams
+ch_rm_orphan_bam_macs_1
+    .combine(ch_rm_orphan_bam_macs_2)
+    .set { ch_rm_orphan_bam_macs_1 }
+
+ch_design_controls_csv
+    .combine(ch_rm_orphan_bam_macs_1)
+    .filter { it[0] == it[5] && it[1] == it[7] }
+    .join(ch_rm_orphan_flagstat_macs)
+    .map { it ->  it[2..-1] }
+    .into { ch_group_bam_macs;
+            ch_group_bam_plotfingerprint;
+            ch_group_bam_deseq }
+
+/*
+ * STEP 6.1 deepTools plotFingerprint
+ */
+process PlotFingerprint {
+    tag "${ip} vs ${control}"
+    label 'process_high'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/deepTools/plotFingerprint", mode: 'copy'
+
+    when:
+    !params.skip_plot_fingerprint
+
+    input:
+    set val(antibody), val(replicatesExist), val(multipleGroups), val(ip), file(ipbam), val(control), file(controlbam), file(ipflagstat) from ch_group_bam_plotfingerprint
+
+    output:
+    file '*.{txt,pdf}' into ch_plotfingerprint_results
+    file '*.raw.txt' into ch_plotfingerprint_mqc
+
+    script:
+    extend = (params.single_end && params.fragment_size > 0) ? "--extendReads ${params.fragment_size}" : ''
+    """
+    plotFingerprint \\
+        --bamfiles ${ipbam[0]} ${controlbam[0]} \\
+        --plotFile ${ip}.plotFingerprint.pdf \\
+        $extend \\
+        --labels $ip $control \\
+        --outRawCounts ${ip}.plotFingerprint.raw.txt \\
+        --outQualityMetrics ${ip}.plotFingerprint.qcmetrics.txt \\
+        --skipZeros \\
+        --JSDsample ${controlbam[0]} \\
+        --numberOfProcessors $task.cpus \\
+        --numberOfSamples $params.fingerprint_bins
+    """
+}
+
+/*
+ * STEP 6.2 Call peaks with MACS2 and calculate FRiP score
+ */
+process MACSCallPeak {
+    tag "${ip} vs ${control}"
+    label 'process_medium'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/macs/${PEAK_TYPE}", mode: 'copy',
+        saveAs: { filename ->
+                      if (filename.endsWith(".tsv")) "qc/$filename"
+                      else if (filename.endsWith(".igv.txt")) null
+                      else filename
+                }
+
+    when:
+    params.macs_gsize
+
+    input:
+    set val(antibody), val(replicatesExist), val(multipleGroups), val(ip), file(ipbam), val(control), file(controlbam), file(ipflagstat) from ch_group_bam_macs
+    file peak_count_header from ch_peak_count_header
+    file frip_score_header from ch_frip_score_header
+
+    output:
+    set val(ip), file("*.{bed,xls,gappedPeak,bdg}") into ch_macs_output
+    set val(antibody), val(replicatesExist), val(multipleGroups), val(ip), val(control), file("*.$PEAK_TYPE") into ch_macs_homer, ch_macs_qc, ch_macs_consensus
+    file "*igv.txt" into ch_macs_igv
+    file "*_mqc.tsv" into ch_macs_mqc
+
+    script:
+    broad = params.narrow_peak ? '' : "--broad --broad-cutoff ${params.broad_cutoff}"
+    format = params.single_end ? "BAM" : "BAMPE"
+    pileup = params.save_macs_pileup ? "-B --SPMR" : ""
+    """
+    macs2 callpeak \\
+        -t ${ipbam[0]} \\
+        -c ${controlbam[0]} \\
+        $broad \\
+        -f $format \\
+        -g $params.macs_gsize \\
+        -n $ip \\
+        $pileup \\
+        --keep-dup all
+
+    cat ${ip}_peaks.${PEAK_TYPE} | wc -l | awk -v OFS='\t' '{ print "${ip}", \$1 }' | cat $peak_count_header - > ${ip}_peaks.count_mqc.tsv
+
+    READS_IN_PEAKS=\$(intersectBed -a ${ipbam[0]} -b ${ip}_peaks.${PEAK_TYPE} -bed -c -f 0.20 | awk -F '\t' '{sum += \$NF} END {print sum}')
+    grep 'mapped (' $ipflagstat | awk -v a="\$READS_IN_PEAKS" -v OFS='\t' '{print "${ip}", a/\$1}' | cat $frip_score_header - > ${ip}_peaks.FRiP_mqc.tsv
+
+    find * -type f -name "*.${PEAK_TYPE}" -exec echo -e "bowtie2/mergedLibrary/macs/${PEAK_TYPE}/"{}"\\t0,0,178" \\; > ${ip}_peaks.igv.txt
+    """
+}
+
+/*
+ * STEP 6.3 Annotate peaks with HOMER
+ */
+process AnnotatePeaks {
+    tag "${ip} vs ${control}"
+    label 'process_medium'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/macs/${PEAK_TYPE}", mode: 'copy'
+
+    when:
+    params.macs_gsize
+
+    input:
+    set val(antibody), val(replicatesExist), val(multipleGroups), val(ip), val(control), file(peak) from ch_macs_homer
+    file fasta from ch_fasta
+    file gtf from ch_gtf
+
+    output:
+    file "*.txt" into ch_macs_annotate
+
+    script:
+    """
+    annotatePeaks.pl \\
+        $peak \\
+        $fasta \\
+        -gid \\
+        -gtf $gtf \\
+        -cpu $task.cpus \\
+        > ${ip}_peaks.annotatePeaks.txt
+    """
+}
+
+/*
+ * STEP 6.4 Aggregated QC plots for peaks, FRiP and peak-to-gene annotation
+ */
+process PeakQC {
+    label "process_medium"
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/macs/${PEAK_TYPE}/qc", mode: 'copy'
+
+    when:
+    params.macs_gsize
+
+    input:
+    file peaks from ch_macs_qc.collect{ it[-1] }
+    file annos from ch_macs_annotate.collect()
+    file peak_annotation_header from ch_peak_annotation_header
+
+    output:
+    file "*.{txt,pdf}" into ch_macs_qc_output
+    file "*.tsv" into ch_macs_qc_mqc
+
+    script:  // This script is bundled with the pipeline, in nf-core/chipseq/bin/
+    """
+    plot_macs_qc.r \\
+        -i ${peaks.join(',')} \\
+        -s ${peaks.join(',').replaceAll("_peaks.${PEAK_TYPE}","")} \\
+        -o ./ \\
+        -p macs_peak
+
+    plot_homer_annotatepeaks.r \\
+        -i ${annos.join(',')} \\
+        -s ${annos.join(',').replaceAll("_peaks.annotatePeaks.txt","")} \\
+        -o ./ \\
+        -p macs_annotatePeaks
+
+    cat $peak_annotation_header macs_annotatePeaks.summary.txt > macs_annotatePeaks.summary_mqc.tsv
+    """
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/* --                                                                     -- */
+/* --                 CONSENSUS PEAKS ANALYSIS                            -- */
+/* --                                                                     -- */
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+// group by ip from this point and carry forward boolean variables
+ch_macs_consensus
+    .map { it ->  [ it[0], it[1], it[2], it[-1] ] }
+    .groupTuple()
+    .map { it ->  [ it[0], it[1][0], it[2][0], it[3].sort() ] }
+    .set { ch_macs_consensus }
+
+/*
+ * STEP 7.1 Consensus peaks across samples, create boolean filtering file, .saf file for featureCounts and UpSetR plot for intersection
+ */
+process ConsensusPeakSet {
+    tag "${antibody}"
+    label 'process_medium'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/macs/${PEAK_TYPE}/consensus/${antibody}", mode: 'copy',
+        saveAs: { filename ->
+                      if (filename.endsWith(".igv.txt")) null
+                      else filename
+                }
+
+    when:
+    params.macs_gsize && (replicatesExist || multipleGroups)
+
+    input:
+    set val(antibody), val(replicatesExist), val(multipleGroups), file(peaks) from ch_macs_consensus
+
+    output:
+    set val(antibody), val(replicatesExist), val(multipleGroups), file("*.bed") into ch_macs_consensus_bed
+    set val(antibody), file("*.saf") into ch_macs_consensus_saf
+    file "*.boolean.txt" into ch_macs_consensus_bool
+    file "*.intersect.{txt,plot.pdf}" into ch_macs_consensus_intersect
+    file "*igv.txt" into ch_macs_consensus_igv
+
+    script: // scripts are bundled with the pipeline, in nf-core/chipseq/bin/
+    prefix = "${antibody}.consensus_peaks"
+    mergecols = params.narrow_peak ? (2..10).join(',') : (2..9).join(',')
+    collapsecols = params.narrow_peak ? (["collapse"]*9).join(',') : (["collapse"]*8).join(',')
+    expandparam = params.narrow_peak ? "--is_narrow_peak" : ""
+    """
+    LC_ALL=C  sort -k1,1 -k2,2n ${peaks.collect{it.toString()}.sort().join(' ')} \\
+        | mergeBed -c $mergecols -o $collapsecols > ${prefix}.txt
+
+    macs2_merged_expand.py ${prefix}.txt \\
+        ${peaks.collect{it.toString()}.sort().join(',').replaceAll("_peaks.${PEAK_TYPE}","")} \\
+        ${prefix}.boolean.txt \\
+        --min_replicates $params.min_reps_consensus \\
+        $expandparam
+
+    awk -v FS='\t' -v OFS='\t' 'FNR > 1 { print \$1, \$2, \$3, \$4, "0", "+" }' ${prefix}.boolean.txt > ${prefix}.bed
+
+    echo -e "GeneID\tChr\tStart\tEnd\tStrand" > ${prefix}.saf
+    awk -v FS='\t' -v OFS='\t' 'FNR > 1 { print \$4, \$1, \$2, \$3,  "+" }' ${prefix}.boolean.txt >> ${prefix}.saf
+
+    plot_peak_intersect.r -i ${prefix}.boolean.intersect.txt -o ${prefix}.boolean.intersect.plot.pdf
+
+    find * -type f -name "${prefix}.bed" -exec echo -e "bowtie2/mergedLibrary/macs/${PEAK_TYPE}/consensus/${antibody}/"{}"\\t0,0,0" \\; > ${prefix}.bed.igv.txt
+    """
+}
+
+/*
+ * STEP 7.2 Annotate consensus peaks with HOMER, and add annotation to boolean output file
+ */
+process ConsensusPeakSetAnnotate {
+    tag "${antibody}"
+    label 'process_medium'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/macs/${PEAK_TYPE}/consensus/${antibody}", mode: 'copy'
+
+    when:
+    params.macs_gsize && (replicatesExist || multipleGroups)
+
+    input:
+    set val(antibody), val(replicatesExist), val(multipleGroups), file(bed) from ch_macs_consensus_bed
+    file bool from ch_macs_consensus_bool
+    file fasta from ch_fasta
+    file gtf from ch_gtf
+
+    output:
+    file "*.annotatePeaks.txt" into ch_macs_consensus_annotate
+
+    script:
+    prefix = "${antibody}.consensus_peaks"
+    """
+    annotatePeaks.pl \\
+        $bed \\
+        $fasta \\
+        -gid \\
+        -gtf $gtf \\
+        -cpu $task.cpus \\
+        > ${prefix}.annotatePeaks.txt
+
+    cut -f2- ${prefix}.annotatePeaks.txt | awk 'NR==1; NR > 1 {print \$0 | "LC_ALL=C sort -k1,1 -k2,2n"}' | cut -f6- > tmp.txt
+    paste $bool tmp.txt > ${prefix}.boolean.annotatePeaks.txt
+    """
+}
+
+// get bam and saf files for each ip
+ch_group_bam_deseq
+    .map { it -> [ it[3], [ it[0], it[1], it[2] ] ] }
+    .join(ch_rm_orphan_name_bam_counts)
+    .map { it -> [ it[1][0], it[1][1], it[1][2], it[2] ] }
+    .groupTuple()
+    .map { it -> [ it[0], it[1][0], it[2][0], it[3].flatten().sort() ] }
+    .join(ch_macs_consensus_saf)
+    .set { ch_group_bam_deseq }
+
+/*
+ * STEP 7.3 Count reads in consensus peaks with featureCounts and perform differential analysis with DESeq2
+ */
+process ConsensusPeakSetDESeq {
+    tag "${antibody}"
+    label 'process_medium'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary/macs/${PEAK_TYPE}/consensus/${antibody}/deseq2", mode: 'copy',
+        saveAs: { filename ->
+                      if (filename.endsWith(".igv.txt")) null
+                      else filename
+                }
+
+    when:
+    params.macs_gsize && replicatesExist && multipleGroups && !params.skip_diff_analysis
+
+    input:
+    set val(antibody), val(replicatesExist), val(multipleGroups), file(bams) ,file(saf) from ch_group_bam_deseq
+    file deseq2_pca_header from ch_deseq2_pca_header
+    file deseq2_clustering_header from ch_deseq2_clustering_header
+
+    output:
+    file "*featureCounts.txt" into ch_macs_consensus_counts
+    file "*featureCounts.txt.summary" into ch_macs_consensus_counts_mqc
+    file "*.{RData,results.txt,pdf,log}" into ch_macs_consensus_deseq_results
+    file "sizeFactors" into ch_macs_consensus_deseq_factors
+    file "*vs*/*.{pdf,txt}" into ch_macs_consensus_deseq_comp_results
+    file "*vs*/*.bed" into ch_macs_consensus_deseq_comp_bed
+    file "*igv.txt" into ch_macs_consensus_deseq_comp_igv
+    file "*.tsv" into ch_macs_consensus_deseq_mqc
+
+    script:
+    prefix = "${antibody}.consensus_peaks"
+    bam_files = bams.findAll { it.toString().endsWith('.bam') }.sort()
+    bam_ext = params.single_end ? ".mLb.clN.sorted.bam" : ".mLb.clN.bam"
+    pe_params = params.single_end ? '' : "-p --donotsort"
+    """
+    featureCounts \\
+        -F SAF \\
+        -O \\
+        --fracOverlap 0.2 \\
+        -T $task.cpus \\
+        $pe_params \\
+        -a $saf \\
+        -o ${prefix}.featureCounts.txt \\
+        ${bam_files.join(' ')}
+
+    featurecounts_deseq2.r -i ${prefix}.featureCounts.txt -b '$bam_ext' -o ./ -p $prefix -s .mLb
+
+    sed 's/deseq2_pca/deseq2_pca_${task.index}/g' <$deseq2_pca_header >tmp.txt
+    sed -i -e 's/DESeq2:/${antibody} DESeq2:/g' tmp.txt
+    cat tmp.txt ${prefix}.pca.vals.txt > ${prefix}.pca.vals_mqc.tsv
+
+    sed 's/deseq2_clustering/deseq2_clustering_${task.index}/g' <$deseq2_clustering_header >tmp.txt
+    sed -i -e 's/DESeq2:/${antibody} DESeq2:/g' tmp.txt
+    cat tmp.txt ${prefix}.sample.dists.txt > ${prefix}.sample.dists_mqc.tsv
+
+    find * -type f -name "*.FDR0.05.results.bed" -exec echo -e "bowtie2/mergedLibrary/macs/${PEAK_TYPE}/consensus/${antibody}/deseq2/"{}"\\t255,0,0" \\; > ${prefix}.igv.txt
+    """
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/* --                                                                     -- */
+/* --                             IGV                                     -- */
+/* --                                                                     -- */
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * STEP 8 - Create IGV session file
+ */
+process IGV {
+    publishDir "${params.outdir}/igv/${PEAK_TYPE}", mode: 'copy'
+
+    when:
+    !params.skip_igv
+
+    input:
+    file fasta from ch_fasta
+    file bigwigs from ch_bigwig_igv.collect().ifEmpty([])
+    file peaks from ch_macs_igv.collect().ifEmpty([])
+    file consensus_peaks from ch_macs_consensus_igv.collect().ifEmpty([])
+    file differential_peaks from ch_macs_consensus_deseq_comp_igv.collect().ifEmpty([])
+
+    output:
+    file "*.{txt,xml}" into ch_igv_session
+
+    script: // scripts are bundled with the pipeline, in nf-core/chipseq/bin/
+    """
+    cat *.txt > igv_files.txt
+    igv_files_to_session.py igv_session.xml igv_files.txt ../../reference_genome/${fasta.getName()} --path_prefix '../../'
+    """
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/* --                                                                     -- */
+/* --                          MULTIQC                                    -- */
+/* --                                                                     -- */
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Parse software version numbers
+ */
+process get_software_versions {
+    publishDir "${params.outdir}/pipeline_info", mode: 'copy',
+        saveAs: { filename ->
+                      if (filename.indexOf(".csv") > 0) filename
+                      else null
+                }
+
+    output:
+    file 'software_versions_mqc.yaml' into ch_software_versions_mqc
+    file "software_versions.csv"
+
+    script:
+    """
+    echo $workflow.manifest.version > v_pipeline.txt
+    echo $workflow.nextflow.version > v_nextflow.txt
+    fastqc --version > v_fastqc.txt
+    trim_galore --version > v_trim_galore.txt
+    echo \$(bowtie2 --version 2>&1) > v_bowtie2.txt
+    samtools --version > v_samtools.txt
+    bedtools --version > v_bedtools.txt
+    echo \$(bamtools --version 2>&1) > v_bamtools.txt
+    echo \$(plotFingerprint --version 2>&1) > v_deeptools.txt || true
+    picard MarkDuplicates --version &> v_picard.txt  || true
+    echo \$(R --version 2>&1) > v_R.txt
+    python -c "import pysam; print(pysam.__version__)" > v_pysam.txt
+    echo \$(macs2 --version 2>&1) > v_macs2.txt
+    touch v_homer.txt
+    echo \$(featureCounts -v 2>&1) > v_featurecounts.txt
+    preseq &> v_preseq.txt
+    multiqc --version > v_multiqc.txt
+    scrape_software_versions.py &> software_versions_mqc.yaml
+    """
+}
+
+def create_workflow_summary(summary) {
+
+    def yaml_file = workDir.resolve('workflow_summary_mqc.yaml')
+    yaml_file.text  = """
+    id: 'nf-core-chipseq-summary'
+    description: " - this information is collected when the pipeline is started."
+    section_name: 'nf-core/chipseq Workflow Summary'
+    section_href: 'https://github.com/nf-core/chipseq'
+    plot_type: 'html'
+    data: |
+        <dl class=\"dl-horizontal\">
+${summary.collect { k,v -> "            <dt>$k</dt><dd><samp>${v ?: '<span style=\"color:#999999;\">N/A</a>'}</samp></dd>" }.join("\n")}
+        </dl>
+    """.stripIndent()
+
+   return yaml_file
+}
+
+/*
+ * STEP 9 - MultiQC
+ */
+process MultiQC {
+    publishDir "${params.outdir}/multiqc/${PEAK_TYPE}", mode: 'copy'
+
+    when:
+    !params.skip_multiqc
+
+    input:
+    file multiqc_config from ch_multiqc_config
+
+    file ('software_versions/*') from ch_software_versions_mqc.collect()
+    file ('workflow_summary/*') from create_workflow_summary(summary)
+
+    file ('fastqc/*') from ch_fastqc_reports_mqc.collect().ifEmpty([])
+    file ('trimgalore/*') from ch_trimgalore_results_mqc.collect().ifEmpty([])
+    file ('trimgalore/fastqc/*') from ch_trimgalore_fastqc_reports_mqc.collect().ifEmpty([])
+
+    file ('alignment/library/*') from ch_sort_bam_flagstat_mqc.collect()
+    file ('alignment/mergedLibrary/*') from ch_merge_bam_stats_mqc.collect()
+    file ('alignment/mergedLibrary/*') from ch_rm_orphan_flagstat_mqc.collect{it[1]}
+    file ('alignment/mergedLibrary/*') from ch_rm_orphan_stats_mqc.collect()
+    file ('alignment/mergedLibrary/picard_metrics/*') from ch_merge_bam_metrics_mqc.collect()
+    file ('alignment/mergedLibrary/picard_metrics/*') from ch_collectmetrics_mqc.collect()
+
+    file ('macs/*') from ch_macs_mqc.collect().ifEmpty([])
+    file ('macs/*') from ch_macs_qc_mqc.collect().ifEmpty([])
+    file ('macs/consensus/*') from ch_macs_consensus_counts_mqc.collect().ifEmpty([])
+    file ('macs/consensus/*') from ch_macs_consensus_deseq_mqc.collect().ifEmpty([])
+
+    file ('preseq/*') from ch_preseq_mqc.collect().ifEmpty([])
+    file ('deeptools/*') from ch_plotfingerprint_mqc.collect().ifEmpty([])
+    file ('deeptools/*') from ch_plotprofile_mqc.collect().ifEmpty([])
+    file ('phantompeakqualtools/*') from ch_spp_out_mqc.collect().ifEmpty([])
+    file ('phantompeakqualtools/*') from ch_spp_csv_mqc.collect().ifEmpty([])
+
+    output:
+    file "*multiqc_report.html" into ch_multiqc_report
+    file "*_data"
+    file "multiqc_plots"
+
+    script:
+    rtitle = custom_runName ? "--title \"$custom_runName\"" : ''
+    rfilename = custom_runName ? "--filename " + custom_runName.replaceAll('\\W','_').replaceAll('_+','_') + "_multiqc_report" : ''
+    """
+    multiqc . -f $rtitle $rfilename --config $multiqc_config \\
+        -m custom_content -m fastqc -m cutadapt -m samtools -m picard -m preseq -m featureCounts -m deeptools -m phantompeakqualtools
+    """
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/* --                                                                     -- */
+/* --                       REPORTS/DOCUMENTATION                         -- */
+/* --                                                                     -- */
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * STEP 10 - Output description HTML
+ */
+process output_documentation {
+    publishDir "${params.outdir}/Documentation", mode: 'copy'
+
+    input:
+    file output_docs from ch_output_docs
+
+    output:
+    file "results_description.html"
+
+    script:
+    """
+    markdown_to_html.r $output_docs results_description.html
+    """
+}
+
+/*
+ * Completion e-mail notification
+ */
+workflow.onComplete {
+
+    // Set up the e-mail variables
+    def subject = "[nf-core/chipseq] Successful: $workflow.runName"
+    if (!workflow.success) {
+        subject = "[nf-core/chipseq] FAILED: $workflow.runName"
+    }
+    def email_fields = [:]
+    email_fields['version'] = workflow.manifest.version
+    email_fields['runName'] = custom_runName ?: workflow.runName
+    email_fields['success'] = workflow.success
+    email_fields['dateComplete'] = workflow.complete
+    email_fields['duration'] = workflow.duration
+    email_fields['exitStatus'] = workflow.exitStatus
+    email_fields['errorMessage'] = (workflow.errorMessage ?: 'None')
+    email_fields['errorReport'] = (workflow.errorReport ?: 'None')
+    email_fields['commandLine'] = workflow.commandLine
+    email_fields['projectDir'] = workflow.projectDir
+    email_fields['summary'] = summary
+    email_fields['summary']['Date Started'] = workflow.start
+    email_fields['summary']['Date Completed'] = workflow.complete
+    email_fields['summary']['Pipeline script file path'] = workflow.scriptFile
+    email_fields['summary']['Pipeline script hash ID'] = workflow.scriptId
+    if (workflow.repository) email_fields['summary']['Pipeline repository Git URL'] = workflow.repository
+    if (workflow.commitId) email_fields['summary']['Pipeline repository Git Commit'] = workflow.commitId
+    if (workflow.revision) email_fields['summary']['Pipeline Git branch/tag'] = workflow.revision
+    if (workflow.container) email_fields['summary']['Docker image'] = workflow.container
+    email_fields['summary']['Nextflow Version'] = workflow.nextflow.version
+    email_fields['summary']['Nextflow Build'] = workflow.nextflow.build
+    email_fields['summary']['Nextflow Compile Timestamp'] = workflow.nextflow.timestamp
+
+    // On success try attach the multiqc report
+    def mqc_report = null
+    try {
+        if (workflow.success) {
+            mqc_report = ch_multiqc_report.getVal()
+            if (mqc_report.getClass() == ArrayList) {
+                log.warn "[nf-core/chipseq] Found multiple reports from process 'multiqc', will use only one"
+                mqc_report = mqc_report[0]
+            }
+        }
+    } catch (all) {
+        log.warn "[nf-core/chipseq] Could not attach MultiQC report to summary email"
+    }
+
+    // Check if we are only sending emails on failure
+    email_address = params.email
+    if (!params.email && params.email_on_fail && !workflow.success) {
+        email_address = params.email_on_fail
+    }
+
+    // Render the TXT template
+    def engine = new groovy.text.GStringTemplateEngine()
+    def tf = new File("$baseDir/assets/email_template.txt")
+    def txt_template = engine.createTemplate(tf).make(email_fields)
+    def email_txt = txt_template.toString()
+
+    // Render the HTML template
+    def hf = new File("$baseDir/assets/email_template.html")
+    def html_template = engine.createTemplate(hf).make(email_fields)
+    def email_html = html_template.toString()
+
+    // Render the sendmail template
+    def smail_fields = [ email: email_address, subject: subject, email_txt: email_txt, email_html: email_html, baseDir: "$baseDir", mqcFile: mqc_report, mqcMaxSize: params.max_multiqc_email_size.toBytes() ]
+    def sf = new File("$baseDir/assets/sendmail_template.txt")
+    def sendmail_template = engine.createTemplate(sf).make(smail_fields)
+    def sendmail_html = sendmail_template.toString()
+
+    // Send the HTML e-mail
+    if (email_address) {
+        try {
+            if (params.plaintext_email) { throw GroovyException('Send plaintext e-mail, not HTML') }
+            // Try to send HTML e-mail using sendmail
+            [ 'sendmail', '-t' ].execute() << sendmail_html
+            log.info "[nf-core/chipseq] Sent summary e-mail to $email_address (sendmail)"
+        } catch (all) {
+            // Catch failures and try with plaintext
+            [ 'mail', '-s', subject, email_address ].execute() << email_txt
+            log.info "[nf-core/chipseq] Sent summary e-mail to $email_address (mail)"
+        }
+    }
+
+    // Write summary e-mail HTML to a file
+    def output_d = new File("${params.outdir}/pipeline_info/")
+    if (!output_d.exists()) {
+        output_d.mkdirs()
+    }
+    def output_hf = new File(output_d, "pipeline_report.html")
+    output_hf.withWriter { w -> w << email_html }
+    def output_tf = new File(output_d, "pipeline_report.txt")
+    output_tf.withWriter { w -> w << email_txt }
+
+    c_reset = params.monochrome_logs ? '' : "\033[0m";
+    c_purple = params.monochrome_logs ? '' : "\033[0;35m";
+    c_green = params.monochrome_logs ? '' : "\033[0;32m";
+    c_red = params.monochrome_logs ? '' : "\033[0;31m";
+
+    if (workflow.stats.ignoredCount > 0 && workflow.success) {
+        log.info "${c_purple}Warning, pipeline completed, but with errored process(es) ${c_reset}"
+        log.info "${c_red}Number of ignored errored process(es) : ${workflow.stats.ignoredCount} ${c_reset}"
+        log.info "${c_green}Number of successfully ran process(es) : ${workflow.stats.succeedCount} ${c_reset}"
+    }
+
+    if (workflow.success) {
+        log.info "${c_purple}[nf-core/chipseq]${c_green} Pipeline completed successfully${c_reset}"
+    } else {
+        checkHostname()
+        log.info "${c_purple}[nf-core/chipseq]${c_red} Pipeline completed with errors${c_reset}"
+    }
+
 }
 
 
