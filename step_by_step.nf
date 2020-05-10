@@ -619,6 +619,95 @@ process SortBAM {
     """
 }
 
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/* --                                                                     -- */
+/* --                    MERGE LIBRARY BAM                                -- */
+/* --                                                                     -- */
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * STEP 4.1 Merge BAM files for all libraries from same replicate
+ */
+ch_sort_bam_merge
+    .map { it -> [ it[0].split('_')[0..-2].join('_'), it[1] ] }
+    .groupTuple(by: [0])
+    .map { it ->  [ it[0], it[1].flatten() ] }
+    .set { ch_sort_bam_merge }
+
+process MergeBAM {
+    tag "$name"
+    label 'process_medium'
+    publishDir "${params.outdir}/bowtie2/mergedLibrary", mode: 'copy',
+        saveAs: { filename ->
+                      if (filename.endsWith(".flagstat")) "samtools_stats/$filename"
+                      else if (filename.endsWith(".idxstats")) "samtools_stats/$filename"
+                      else if (filename.endsWith(".stats")) "samtools_stats/$filename"
+                      else if (filename.endsWith(".metrics.txt")) "picard_metrics/$filename"
+                      else params.save_align_intermeds ? filename : null
+                }
+
+    input:
+    set val(name), file(bams) from ch_sort_bam_merge
+
+    output:
+    set val(name), file("*${prefix}.sorted.{bam,bam.bai}") into ch_merge_bam_filter,
+                                                                ch_merge_bam_preseq
+    file "*.{flagstat,idxstats,stats}" into ch_merge_bam_stats_mqc
+    file "*.txt" into ch_merge_bam_metrics_mqc
+
+    script:
+    prefix = "${name}.mLb.mkD"
+    bam_files = bams.findAll { it.toString().endsWith('.bam') }.sort()
+    def avail_mem = 3
+    if (!task.memory) {
+        log.info "[Picard MarkDuplicates] Available memory not known - defaulting to 3GB. Specify process memory requirements to change this."
+    } else {
+        avail_mem = task.memory.toGiga()
+    }
+    if (bam_files.size() > 1) {
+        """
+        picard -Xmx${avail_mem}g MergeSamFiles \\
+            ${'INPUT='+bam_files.join(' INPUT=')} \\
+            OUTPUT=${name}.sorted.bam \\
+            SORT_ORDER=coordinate \\
+            VALIDATION_STRINGENCY=LENIENT \\
+            TMP_DIR=tmp
+        samtools index ${name}.sorted.bam
+
+        picard -Xmx${avail_mem}g MarkDuplicates \\
+            INPUT=${name}.sorted.bam \\
+            OUTPUT=${prefix}.sorted.bam \\
+            ASSUME_SORTED=true \\
+            REMOVE_DUPLICATES=false \\
+            METRICS_FILE=${prefix}.MarkDuplicates.metrics.txt \\
+            VALIDATION_STRINGENCY=LENIENT \\
+            TMP_DIR=tmp
+
+        samtools index ${prefix}.sorted.bam
+        samtools idxstats ${prefix}.sorted.bam > ${prefix}.sorted.bam.idxstats
+        samtools flagstat ${prefix}.sorted.bam > ${prefix}.sorted.bam.flagstat
+        samtools stats ${prefix}.sorted.bam > ${prefix}.sorted.bam.stats
+        """
+    } else {
+      """
+      picard -Xmx${avail_mem}g MarkDuplicates \\
+          INPUT=${bam_files[0]} \\
+          OUTPUT=${prefix}.sorted.bam \\
+          ASSUME_SORTED=true \\
+          REMOVE_DUPLICATES=false \\
+          METRICS_FILE=${prefix}.MarkDuplicates.metrics.txt \\
+          VALIDATION_STRINGENCY=LENIENT \\
+          TMP_DIR=tmp
+
+      samtools index ${prefix}.sorted.bam
+      samtools idxstats ${prefix}.sorted.bam > ${prefix}.sorted.bam.idxstats
+      samtools flagstat ${prefix}.sorted.bam > ${prefix}.sorted.bam.flagstat
+      samtools stats ${prefix}.sorted.bam > ${prefix}.sorted.bam.stats
+      """
+    }
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
