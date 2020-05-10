@@ -764,6 +764,67 @@ process MergeBAMFilter {
     """
 }
 
+/*
+ * STEP 4.3 Remove orphan reads from paired-end BAM file
+ */
+if (params.single_end) {
+    ch_filter_bam
+        .into { ch_rm_orphan_bam_metrics;
+                ch_rm_orphan_bam_bigwig;
+                ch_rm_orphan_bam_macs_1;
+                ch_rm_orphan_bam_macs_2;
+                ch_rm_orphan_bam_phantompeakqualtools;
+                ch_rm_orphan_name_bam_counts }
+
+    ch_filter_bam_flagstat
+        .into { ch_rm_orphan_flagstat_bigwig;
+                ch_rm_orphan_flagstat_macs;
+                ch_rm_orphan_flagstat_mqc }
+
+    ch_filter_bam_stats_mqc
+        .set { ch_rm_orphan_stats_mqc }
+} else {
+    process MergeBAMRemoveOrphan {
+        tag "$name"
+        label 'process_medium'
+        publishDir path: "${params.outdir}/bowtie2/mergedLibrary", mode: 'copy',
+            saveAs: { filename ->
+                          if (filename.endsWith(".flagstat")) "samtools_stats/$filename"
+                          else if (filename.endsWith(".idxstats")) "samtools_stats/$filename"
+                          else if (filename.endsWith(".stats")) "samtools_stats/$filename"
+                          else if (filename.endsWith(".sorted.bam")) filename
+                          else if (filename.endsWith(".sorted.bam.bai")) filename
+                          else null
+                    }
+
+        input:
+        set val(name), file(bam) from ch_filter_bam
+
+        output:
+        set val(name), file("*.sorted.{bam,bam.bai}") into ch_rm_orphan_bam_metrics,
+                                                           ch_rm_orphan_bam_bigwig,
+                                                           ch_rm_orphan_bam_macs_1,
+                                                           ch_rm_orphan_bam_macs_2,
+                                                           ch_rm_orphan_bam_phantompeakqualtools
+        set val(name), file("${prefix}.bam") into ch_rm_orphan_name_bam_counts
+        set val(name), file("*.flagstat") into ch_rm_orphan_flagstat_bigwig,
+                                               ch_rm_orphan_flagstat_macs,
+                                               ch_rm_orphan_flagstat_mqc
+        file "*.{idxstats,stats}" into ch_rm_orphan_stats_mqc
+
+        script: // This script is bundled with the pipeline, in nf-core/chipseq/bin/
+        prefix = "${name}.mLb.clN"
+        """
+        bampe_rm_orphan.py ${bam[0]} ${prefix}.bam --only_fr_pairs
+
+        samtools sort -@ $task.cpus -o ${prefix}.sorted.bam -T $prefix ${prefix}.bam
+        samtools index ${prefix}.sorted.bam
+        samtools flagstat ${prefix}.sorted.bam > ${prefix}.sorted.bam.flagstat
+        samtools idxstats ${prefix}.sorted.bam > ${prefix}.sorted.bam.idxstats
+        samtools stats ${prefix}.sorted.bam > ${prefix}.sorted.bam.stats
+        """
+    }
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
