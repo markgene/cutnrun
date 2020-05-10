@@ -585,6 +585,41 @@ process Bowtie2 {
     """
 }
 
+/*
+ * STEP 3.2 - Convert .bam to coordinate sorted .bam
+ */
+process SortBAM {
+    tag "$name"
+    label 'process_medium'
+    if (params.save_align_intermeds) {
+        publishDir path: "${params.outdir}/bowtie2/library", mode: 'copy',
+            saveAs: { filename ->
+                          if (filename.endsWith(".flagstat")) "samtools_stats/$filename"
+                          else if (filename.endsWith(".idxstats")) "samtools_stats/$filename"
+                          else if (filename.endsWith(".stats")) "samtools_stats/$filename"
+                          else filename
+                    }
+    }
+
+    input:
+    set val(name), file(bam) from ch_bowtie2_bam
+
+    output:
+    set val(name), file("*.sorted.{bam,bam.bai}") into ch_sort_bam_merge
+    file "*.{flagstat,idxstats,stats}" into ch_sort_bam_flagstat_mqc
+
+    script:
+    prefix = "${name}.Lb"
+    """
+    samtools sort -@ $task.cpus -o ${prefix}.sorted.bam -T $name $bam
+    samtools index ${prefix}.sorted.bam
+    samtools flagstat ${prefix}.sorted.bam > ${prefix}.sorted.bam.flagstat
+    samtools idxstats ${prefix}.sorted.bam > ${prefix}.sorted.bam.idxstats
+    samtools stats ${prefix}.sorted.bam > ${prefix}.sorted.bam.stats
+    """
+}
+
+
 ///////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////
 /* --                                                                     -- */
